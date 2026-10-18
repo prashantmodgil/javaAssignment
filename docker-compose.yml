@@ -1,0 +1,50 @@
+services:
+  gcs-emulator:
+    # Local GCS-compatible API; use the service name from other containers.
+    image: fsouza/fake-gcs-server:latest
+    container_name: gcs-emulator
+    command: ["-scheme", "http", "-port", "8080"]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  postgres-db:
+    # The initialization script runs only when the data directory is empty.
+    image: postgres:16-alpine
+    container_name: postgres-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: my_database
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: yourextrasecretpassword
+    volumes:
+      # Keep database rows when containers are stopped or recreated.
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    # The pipeline waits for this check before connecting to PostgreSQL.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d my_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  pipeline:
+    # One-shot job: `docker compose run --build --rm pipeline` starts it.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gcs-to-postgres-pipeline:local
+    profiles: ["pipeline"]
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      gcs-emulator:
+        condition: service_started
+    command:
+      - "-Dexec.args=--inputFile=gs://my-test-bucket/input_file.csv --jdbcUrl=jdbc:postgresql://postgres-db:5432/my_database --dbUsername=postgres --dbPassword=yourextrasecretpassword --gcsEmulatorEndpoint=http://gcs-emulator:8080/storage/v1/"
+
+volumes:
+  # Remove only with `docker compose down -v`; this deletes persisted rows.
+  postgres-data:
